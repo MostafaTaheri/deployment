@@ -1,0 +1,15 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.secrets
+keycloak/.alohome-dev-secrets
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Logs and local data
+*.log
+data/

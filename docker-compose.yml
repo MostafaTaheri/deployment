@@ -1,0 +1,127 @@
+# Local infrastructure for the AloHome API: Keycloak, PostgreSQL, Redis and RabbitMQ.
+# Ports and credentials match src/AloHome.Api/appsettings.Development.json.
+#
+# Not for production: Keycloak runs in dev mode on its embedded H2 database and every password is a local default.
+#
+# Usage:
+#   docker compose up -d                 # start everything
+#   ./keycloak/setup-alohome-realm.sh    # create or update the "alohome" realm (idempotent)
+#   Keycloak admin console: http://localhost:8020/admin   (admin / admin)
+#   RabbitMQ management:    http://localhost:15672        (admin / admin)
+
+name: alohome
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:${KEYCLOAK_VERSION:-26.8.1}
+    container_name: alohome-keycloak
+    command: ["start-dev", "--import-realm"]
+    restart: unless-stopped
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-admin}
+
+      # Fixed issuer so tokens match what the API validates,
+      # while other containers on the network can still call keycloak:8080.
+      KC_HOSTNAME: http://localhost:${KEYCLOAK_PORT:-8020}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HTTP_ENABLED: "true"
+
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KC_LOG_LEVEL: ${KC_LOG_LEVEL:-info}
+
+      # KeyCloakRestClient.ExchangeTokenAsync sends `requested_subject`,
+      # which is impersonation and needs legacy token exchange (V1).
+      KC_FEATURES: ${KC_FEATURES:-token-exchange,admin-fine-grained-authz:v1}
+    ports:
+      - "${KEYCLOAK_PORT:-8020}:8080"
+      - "${KEYCLOAK_MANAGEMENT_PORT:-9020}:9000"
+    volumes:
+      # Persists the H2 database (data/h2) and other runtime data.
+      - keycloak-data:/opt/keycloak/data
+      # Realm export JSON files placed here are imported on startup
+      # (existing realms are skipped, not overwritten).
+      - ./keycloak/realms:/opt/keycloak/data/import:ro
+    healthcheck:
+      # The Keycloak image has no curl, so probe the management port with bash.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q 'UP' <&3
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - alohome
+
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-17}
+    container_name: alohome-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-@dmin2026}
+      POSTGRES_DB: alohome
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d alohome"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - alohome
+
+  redis:
+    image: redis/redis-stack-server:${REDIS_VERSION:-7.4.0-v8}
+    container_name: alohome-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - alohome
+
+  rabbitmq:
+    image: rabbitmq:${RABBITMQ_VERSION:-3-management}
+    container_name: alohome-rabbitmq
+    restart: unless-stopped
+    environment:
+      # The default guest user only accepts connections from inside the container,
+      # so a named user is needed for the API running on the host.
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-admin}
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - alohome
+
+volumes:
+  keycloak-data:
+  # postgres-data:
+  redis-data:
+  rabbitmq-data:
+
+networks:
+  alohome:
+    name: alohome
